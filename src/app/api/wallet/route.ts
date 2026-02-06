@@ -75,6 +75,26 @@ export async function POST(req: NextRequest) {
                 });
             }
 
+            case 'getAllBalances': {
+                const { chains, tokenSymbol } = params;
+                const { getOrCreateWallet } = await import('@/lib/serverWallet');
+                const { getAllTokenBalances } = await import('@/lib/tokenDetection');
+
+                // Get the main wallet address (should be the same across ARC and EVM chains for this user)
+                const wallet = await getOrCreateWallet(actualUserId, 'arcTestnet');
+
+                const tokenBalances = await getAllTokenBalances(
+                    wallet.address,
+                    chains || ['arcTestnet', 'ethereumSepolia', 'baseSepolia'],
+                    tokenSymbol
+                );
+
+                return NextResponse.json({
+                    success: true,
+                    balances: tokenBalances
+                });
+            }
+
             case 'executeContractCall': {
                 // CRITICAL: Get wallet by userId+blockchain, NOT trust walletId from client
                 const { contractAddress, functionSignature, parameters, blockchain } = params;

@@ -85,7 +85,7 @@ export async function processUserIntent(
 
             switch (name) {
                 case 'getBalance':
-                    res = await WalletSkills.getBalance(context, args.chain);
+                    res = await WalletSkills.getBalance(context, args.chain, args.token);
                     break;
                 case 'transfer':
                     res = await WalletSkills.transfer(args.to, args.amount, context, args.chain);
@@ -103,6 +103,50 @@ export async function processUserIntent(
                 case 'bridge':
                     res = await BridgeSkill.bridgeUSDC(args, context);
                     break;
+                case 'swap': {
+                    const { SwapSkill } = await import("./skills/defi/swapSkill");
+                    console.log(`[Engine] Swap Args:`, JSON.stringify(args));
+
+                    // Comprehensive alias mapping for AI's creative parameter naming
+                    const fromToken = args.fromToken || args.from_token || args.token_in || args.tokenIn ||
+                        args.currency || args.fromCurrency || args.sellToken || args.token_sell ||
+                        args.sell || args.from || args.tokenSymbolIn;
+
+                    const toToken = args.toToken || args.to_token || args.token_out || args.tokenOut ||
+                        args.destination_currency || args.toCurrency || args.buyToken || args.token_buy ||
+                        args.buy || args.to || args.token || args.tokenSymbolOut;
+
+                    console.log(`[Engine] Resolved swap tokens: ${fromToken} -> ${toToken}`);
+
+                    res = await SwapSkill.swap(
+                        fromToken,
+                        toToken,
+                        args.amount,
+                        context,
+                        args.maxSlippage,
+                        args.chain
+                    );
+                    break;
+                }
+                case 'getQuote': {
+                    const { SwapSkill: QuoteSkill } = await import("./skills/defi/swapSkill");
+
+                    const fromToken = args.fromToken || args.from_token || args.token_in || args.tokenIn ||
+                        args.currency || args.fromCurrency || args.sellToken || args.token_sell ||
+                        args.sell || args.from || args.tokenSymbolIn;
+
+                    const toToken = args.toToken || args.to_token || args.token_out || args.tokenOut ||
+                        args.destination_currency || args.toCurrency || args.buyToken || args.token_buy ||
+                        args.buy || args.to || args.token || args.tokenSymbolOut;
+
+                    res = await QuoteSkill.getQuote(
+                        fromToken,
+                        toToken,
+                        args.amount,
+                        args.chain
+                    );
+                    break;
+                }
                 default:
                     return { text: "I don't know how to execute that tool yet." };
             }

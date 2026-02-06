@@ -9,40 +9,54 @@ export const WalletSkills = {
     /**
      * Get Address Balance (Defaults to Arc Hub)
      */
-    getBalance: async (context: AgentContext, chain?: string): Promise<ToolResult> => {
+    getBalance: async (context: AgentContext, chain?: string, tokenSymbol?: string): Promise<ToolResult> => {
         try {
             const { resolveChainKey } = await import("../cross-chain/bridgeSkill");
-            const chainKey = chain ? resolveChainKey(chain) : 'arcTestnet';
+
+            const targetChains = chain
+                ? [resolveChainKey(chain)]
+                : ['arcTestnet', 'ethereumSepolia', 'baseSepolia'];
 
             const response = await fetch('/api/wallet', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    action: 'getBalance',
-                    userId: context.userId, // CRITICAL: no more 'guest' fallback
-                    blockchain: chainKey
+                    action: 'getAllBalances',
+                    userId: context.userId,
+                    chains: targetChains,
+                    tokenSymbol: tokenSymbol
                 }),
             });
 
             const data = await response.json();
+            const tokenBalances = data.balances || [];
 
-            if (data.success && data.balance) {
-                const rawUsdc = data.balance.usdc || '0';
-
-                // Circle SDK returns human-readable amounts (e.g. "0.13")
-                const usdcBalance = parseFloat(rawUsdc);
-
-                const bal = usdcBalance.toFixed(2);
-                const chainName = chainKey === 'arcTestnet' ? 'Arc Hub' : chainKey;
-
+            if (tokenBalances.length === 0) {
                 return {
                     success: true,
-                    message: `Your balance on ${chainName} is ${bal} USDC.`,
-                    data: bal
+                    message: chain
+                        ? `You don't have any supported tokens on ${chain}.`
+                        : "Your wallet is currently empty across all supported chains (Arc, Base, Sepolia)."
                 };
-            } else {
-                return { success: false, message: `Failed to fetch balance from ${chain || 'Arc Hub'}.` };
             }
+
+            if (!chain) {
+                // Multi-chain Portfolio Check
+                const report = tokenBalances.map((t: any) => `- **${t.balance} ${t.symbol}** on ${t.chain}`).join('\n');
+                return {
+                    success: true,
+                    message: `Here is your current portfolio:\n${report}`,
+                    data: tokenBalances
+                };
+            }
+
+            // Specific Chain Check
+            const report = tokenBalances.map((t: any) => `${t.balance} ${t.symbol}`).join(', ');
+            return {
+                success: true,
+                message: `Your balance on ${chain} is: ${report}.`,
+                data: tokenBalances
+            };
         } catch (e: any) {
             console.error(e);
             return { success: false, message: `Failed to fetch balance: ${e.message}` };

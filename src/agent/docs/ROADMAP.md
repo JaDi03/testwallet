@@ -90,9 +90,11 @@ Estas no tocan blockchain — controlan el razonamiento.
 
 ## 🔄 CAPA 5 — Swap & Conversion Skills
 
-### 1️⃣5️⃣ Token Swap Skill
+### 1️⃣5️⃣ Token Swap Skill ✅ **IMPLEMENTADO**
 - Cotizar swap, simular, ejecutar
 - Slippage control
+- Uniswap V2 integration
+- Autonomous execution
 
 ### 1️⃣6️⃣ Auto-Balance Skill
 - Balancear tokens para LP

@@ -40,13 +40,13 @@ function AppContent() {
     const [messages, setMessages] = useState<Message[]>([
         {
             id: "1",
-            text: "Hello Traveler!",
+            text: "Welcome to ArcWorker Wallet",
             sender: "agent",
             type: "text",
         },
         {
             id: "2",
-            text: "How can I help you today? I can move funds, bridge assets, or check yields.",
+            text: "I can help you manage your assets across chains. How can I assist you today?",
             sender: "agent",
             type: "text",
         },
@@ -62,6 +62,38 @@ function AppContent() {
         setSession(sess);
         setView("dashboard");
     };
+
+    // Auto-Login for Demo (Bypass WalletConnect UI)
+    useEffect(() => {
+        if (!userId) return;
+        const autoLogin = async () => {
+            try {
+                // Fetch autonomous wallet
+                const response = await fetch('/api/wallet', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'getOrCreateWallet', userId }),
+                });
+                const data = await response.json();
+
+                if (data.success || data.walletId) {
+                    const sess: WalletSession = {
+                        address: data.address,
+                        smartAccount: null,
+                        bundlerClient: null,
+                        credential: null
+                    };
+                    handleLoginSuccess(sess);
+                }
+            } catch (e) {
+                console.error("Auto-login failed:", e);
+            }
+        };
+
+        if (!session) {
+            autoLogin();
+        }
+    }, [userId]);
 
     const handleLogout = () => {
         setSession(null);
@@ -96,9 +128,23 @@ function AppContent() {
     return (
         <main className="flex min-h-screen flex-col items-center justify-start p-6 bg-slate-50 dark:bg-slate-950">
             <div className="z-10 w-full max-w-5xl items-center justify-between font-mono text-sm lg:flex mb-8">
-                <p className="fixed left-0 top-0 flex w-full justify-center border-b border-gray-300 bg-gradient-to-b from-zinc-200 pb-6 pt-8 backdrop-blur-2xl dark:border-neutral-800 dark:bg-zinc-800/30 dark:from-inherit lg:static lg:w-auto  lg:rounded-xl lg:border lg:bg-gray-200 lg:p-4 lg:dark:bg-zinc-800/30">
-                    Arc Smart Agent Wallet
-                </p>
+                <div className="fixed left-0 top-0 flex w-full justify-center border-b border-slate-200 bg-white/80 pb-6 pt-8 backdrop-blur-2xl dark:border-slate-800 dark:bg-slate-950/80 lg:static lg:w-auto lg:rounded-xl lg:border lg:p-4">
+                    <div className="flex items-center gap-3">
+                        <img
+                            src="/logo.png"
+                            alt="ArcWorker Logo"
+                            className="h-8 w-auto object-contain"
+                            onError={(e) => {
+                                e.currentTarget.style.display = 'none';
+                                e.currentTarget.nextElementSibling?.classList.remove('hidden');
+                            }}
+                        />
+                        <span className="hidden text-xl font-bold bg-gradient-to-r from-[#00E599] to-[#0052FF] bg-clip-text text-transparent">
+                            ArcWorker Wallet
+                        </span>
+                        {/* Fallback Text if Image fails (and JS handles toggling) or just always show text next to logo? User asked for branding. */}
+                    </div>
+                </div>
             </div>
             <WalletConnect onConnect={handleLoginSuccess} userId={userId} />
         </main>

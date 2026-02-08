@@ -94,5 +94,33 @@ export const AgentTools = {
             console.error(e);
             return { success: false, message: `Investment failed: ${e.message || "Unknown error"}` };
         }
+    },
+
+    /**
+     * Token Swap - Buy/Sell tokens on DEX
+     */
+    swap: async (
+        fromToken: string,
+        toToken: string,
+        amount: string,
+        context: { userId: string; userAddress: string; session?: any },
+        maxSlippage?: number,
+        chain?: string
+    ): Promise<ToolResult> => {
+        const { SwapSkill } = await import("./skills/defi/swapSkill");
+        return SwapSkill.swap(fromToken, toToken, amount, context, maxSlippage, chain);
+    },
+
+    /**
+     * Get Swap Quote - Check price without executing
+     */
+    getSwapQuote: async (
+        fromToken: string,
+        toToken: string,
+        amount: string,
+        chain?: string
+    ): Promise<ToolResult> => {
+        const { SwapSkill } = await import("./skills/defi/swapSkill");
+        return SwapSkill.getQuote(fromToken, toToken, amount, chain);
     }
 };

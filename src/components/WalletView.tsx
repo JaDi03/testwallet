@@ -7,6 +7,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { sendTransfer } from "@/lib/wallet-sdk";
 import { useToast } from "@/hooks/use-toast";
 import { processUserIntent } from "@/agent/engine";
+import { getTokenColor, getTokenIcon } from "@/lib/tokenUI";
 
 export interface Message {
     id: string;
@@ -25,22 +26,42 @@ interface WalletViewProps {
     setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
 }
 
-// Helper to render text with links
+// Helper to render text with Markdown-style links [text](url) and raw URLs
 const LinkRenderer = ({ text }: { text: string }) => {
-    const urlRegex = /(https?:\/\/[^\s]+)/g;
-    const parts = text.split(urlRegex);
+    // Regex for [label](url)
+    const mdLinkRegex = /\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g;
+    // Regex for raw URLs (fallback)
+    const rawUrlRegex = /(https?:\/\/[^\s]+)/g;
 
+    const parts = [];
+    let lastIndex = 0;
+
+    // We basically need to parse MD links first, then raw URLs in the text between?
+    // Simplified approach: Split by MD links first.
+    let match;
+    while ((match = mdLinkRegex.exec(text)) !== null) {
+        // Text before the match
+        if (match.index > lastIndex) {
+            parts.push(text.substring(lastIndex, match.index));
+        }
+        // The Link
+        parts.push(
+            <a key={match.index} href={match[2]} target="_blank" rel="noopener noreferrer" className="text-blue-400 underline break-all font-bold">
+                {match[1]}
+            </a>
+        );
+        lastIndex = mdLinkRegex.lastIndex;
+    }
+    // Remaining text
+    if (lastIndex < text.length) {
+        parts.push(text.substring(lastIndex));
+    }
+
+    // Now, we could (optionally) scan the text parts for raw URLs, 
+    // but for now let's just return the parts, simpler for the specific request.
     return (
-        <span>
-            {parts.map((part, i) =>
-                urlRegex.test(part) ? (
-                    <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="text-blue-400 underline break-all">
-                        {part}
-                    </a>
-                ) : (
-                    part
-                )
-            )}
+        <span className="break-words whitespace-pre-wrap">
+            {parts.length > 0 ? parts : text}
         </span>
     );
 };
@@ -61,6 +82,7 @@ export default function WalletView({ address, session, userId, onLogout, onBack,
     // Chat State
     const [input, setInput] = useState("");
     const [isTyping, setIsTyping] = useState(false);
+    const [processingAction, setProcessingAction] = useState<"bridging" | "sending" | "swapping" | "thinking">("thinking"); // Fixed: Re-added missing state
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
     // Auto-scroll
@@ -72,13 +94,27 @@ export default function WalletView({ address, session, userId, onLogout, onBack,
     }, [messages, isTyping]);
 
     useEffect(() => {
-        if (webApp) webApp.expand();
-        webApp?.BackButton?.show();
-        webApp?.BackButton?.onClick(onBack);
+        if (webApp) {
+            webApp.expand();
+            // Suppress BackButton warning for web demo
+            try {
+                // Only try to show if it exists and version allows, otherwise ignore
+                if (webApp.BackButton && webApp.version && parseFloat(webApp.version) >= 6.1) {
+                    webApp.BackButton.show();
+                    webApp.BackButton.onClick(onBack);
+                }
+            } catch (e) {
+                // Ignore telegram errors for local demo
+            }
+        }
 
         return () => {
-            webApp?.BackButton?.hide();
-            webApp?.BackButton?.offClick(onBack);
+            try {
+                if (webApp?.BackButton) {
+                    webApp.BackButton.hide();
+                    webApp.BackButton.offClick(onBack);
+                }
+            } catch (e) { }
         }
     }, [webApp, onBack]);
 
@@ -86,29 +122,26 @@ export default function WalletView({ address, session, userId, onLogout, onBack,
     const fetchBalance = async () => {
         setIsLoadingBalance(true);
         try {
+            // Fetch all token balances across all supported chains via server API
             const response = await fetch('/api/wallet', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    action: 'getBalance',
+                    action: 'getAllBalances',
                     userId: userId,
-                    blockchain: 'arcTestnet'
+                    chains: ['arcTestnet', 'ethereumSepolia', 'baseSepolia']
                 }),
             });
-
             const data = await response.json();
+            const tokenBalances = data.balances || [];
 
-            if (data.success && data.balance) {
-                const rawUsdc = data.balance.usdc || '0';
-                const decimals = data.balance.usdcDecimals || 18;
-                let usdcBalance = parseFloat(rawUsdc);
-                if (usdcBalance > 1000000 || rawUsdc.length > 10) {
-                    usdcBalance = usdcBalance / Math.pow(10, decimals);
-                }
-                setBalance(usdcBalance.toFixed(2));
-            } else {
-                setBalance("0.00");
-            }
+            // Calculate total balance across all tokens
+            const totalBalance = tokenBalances.reduce((acc: number, token: any) => {
+                const val = parseFloat(token.balance);
+                return acc + (isNaN(val) ? 0 : val);
+            }, 0);
+
+            setBalance(totalBalance.toFixed(2));
         } catch (error) {
             console.error("Balance fetch error:", error);
             setBalance("0.00");
@@ -124,6 +157,18 @@ export default function WalletView({ address, session, userId, onLogout, onBack,
     const handleSend = async (manualText?: string) => {
         const textToSend = manualText || input;
         if (!textToSend.trim()) return;
+
+        // Detect intent for UX feedback
+        const lowerText = textToSend.toLowerCase();
+        if (lowerText.includes("bridge") || lowerText.includes("puente") || lowerText.includes("cross-chain") || lowerText.includes("optimism") || lowerText.includes("arbitrum") || lowerText.includes("mover a")) {
+            setProcessingAction("bridging");
+        } else if (lowerText.includes("send") || lowerText.includes("transfer") || lowerText.includes("enviar") || lowerText.includes("mover") || lowerText.includes("pagar")) {
+            setProcessingAction("sending");
+        } else if (lowerText.includes("swap") || lowerText.includes("buy") || lowerText.includes("sell") || lowerText.includes("comprar") || lowerText.includes("vender") || lowerText.includes("cambiar") || lowerText.includes("exchange")) {
+            setProcessingAction("swapping");
+        } else {
+            setProcessingAction("thinking");
+        }
 
         // 1. User Message
         const userMsg: Message = {
@@ -179,34 +224,76 @@ export default function WalletView({ address, session, userId, onLogout, onBack,
             />
 
             {/* --- Simple Chat Header --- */}
-            <div className="bg-slate-900 text-white p-4 py-3 shadow-md z-10 flex items-center gap-3">
-                <button onClick={onBack} className="md:hidden p-1 -ml-1">
+            <div className="bg-white dark:bg-slate-950 border-b border-slate-100 dark:border-slate-800 p-4 py-3 shadow-sm z-10 flex items-center gap-3">
+                <button onClick={onBack} className="md:hidden p-1 -ml-1 text-slate-500">
                     {/* Fallback back button if Telegram BackButton fails */}
                     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6" /></svg>
                 </button>
                 <div className="flex-1">
-                    <h3 className="font-bold text-sm">Arc Agent</h3>
-                    <p className="text-[10px] text-green-400 flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-green-400"></span>
-                        Online • ${balance} USDC
-                    </p>
+                    {/* Replaced Text with Logo Image */}
+                    <div className="flex items-center gap-3">
+                        <img
+                            src="/logo.png"
+                            alt="ArcWorker Wallet"
+                            width={64}
+                            height={64}
+                            className="h-16 w-auto object-contain block" // Increased to h-16
+                            loading="eager" // Preload
+                            onError={(e) => {
+                                // Fallback to text if image missing
+                                e.currentTarget.style.display = 'none';
+                                e.currentTarget.nextElementSibling?.classList.remove('hidden');
+                            }}
+                        />
+                        <h3 className="hidden font-black text-xl bg-gradient-to-r from-[#00E599] to-[#0052FF] bg-clip-text text-transparent">
+                            ArcWorker Wallet
+                        </h3>
+                    </div>
+
+                    <div className="flex items-center gap-2 mt-0.5">
+                        {/* <p className="text-[10px] text-green-500 flex items-center gap-1 font-medium">
+                            <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
+                            Online
+                        </p>
+                        <span className="text-[10px] text-slate-300">|</span> */}
+
+                        {/* Interactive Balance/Address Area with Copy */}
+                        <button
+                            onClick={() => {
+                                if (navigator.clipboard && address) {
+                                    navigator.clipboard.writeText(address);
+                                    // Simple toast using existing toast hook or custom element if toast hook not available in this context
+                                    // For consistency with Dashboard, we'll try to use the hook if available or just alert/console
+                                    // But wait, we have useToast imported!
+                                    toast({ title: "Address Copied", description: `${address.slice(0, 6)}...${address.slice(-4)} copied to clipboard.` });
+                                }
+                            }}
+                            className="flex items-center gap-1.5 px-2 py-0.5 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer group"
+                            title="Copy Address"
+                        >
+                            <p className="text-[10px] text-slate-500 dark:text-slate-400 font-mono group-hover:text-primary transition-colors">
+                                {balance} USDC
+                            </p>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-slate-400 group-hover:text-primary"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></svg>
+                        </button>
+                    </div>
                 </div>
 
                 {/* Manual Actions in Header */}
                 <div className="flex items-center gap-2">
                     <button
                         onClick={() => setIsSendOpen(true)}
-                        className="p-2 bg-white/10 rounded-xl hover:bg-white/20 transition-colors text-indigo-400"
+                        className="p-2 bg-slate-50 dark:bg-slate-900 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-primary"
                         title="Send"
                     >
-                        <Send size={16} />
+                        <Send size={18} />
                     </button>
                     <button
                         onClick={() => setIsReceiveOpen(true)}
-                        className="p-2 bg-white/10 rounded-xl hover:bg-white/20 transition-colors text-indigo-400"
+                        className="p-2 bg-slate-50 dark:bg-slate-900 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-primary"
                         title="Receive"
                     >
-                        <Droplets size={16} />
+                        <Droplets size={18} />
                     </button>
                 </div>
             </div>
@@ -224,11 +311,11 @@ export default function WalletView({ address, session, userId, onLogout, onBack,
                         >
                             <div
                                 className={`max-w-[85%] p-3 rounded-2xl text-sm leading-relaxed shadow-sm ${msg.sender === "user"
-                                    ? "bg-indigo-600 text-white rounded-br-none"
-                                    : "bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 rounded-bl-none border border-slate-100 dark:border-slate-700"
+                                    ? "bg-primary text-primary-foreground rounded-br-none"
+                                    : "bg-card text-card-foreground rounded-bl-none border border-border"
                                     }`}
                             >
-                                {msg.text}
+                                <LinkRenderer text={msg.text} />
                             </div>
                         </motion.div>
                     ))}
@@ -236,10 +323,50 @@ export default function WalletView({ address, session, userId, onLogout, onBack,
 
                 {isTyping && (
                     <div className="flex justify-start">
-                        <div className="bg-white dark:bg-slate-800 p-3 rounded-2xl rounded-bl-none shadow-sm flex gap-1 items-center border border-slate-100 dark:border-slate-700">
-                            <div className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce" />
-                            <div className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce delay-100" />
-                            <div className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce delay-200" />
+                        <div className="bg-white dark:bg-slate-800 p-3 rounded-2xl rounded-bl-none shadow-sm flex gap-3 items-center border border-slate-100 dark:border-slate-700 animate-pulse">
+
+                            {/* Icon based on Action */}
+                            {processingAction === "bridging" && (
+                                <div className="p-2 bg-indigo-100 dark:bg-indigo-900/30 rounded-full text-indigo-500">
+                                    <ArrowRightLeft className="w-4 h-4 animate-spin-slow" />
+                                </div>
+                            )}
+                            {processingAction === "sending" && (
+                                <div className="p-2 bg-green-100 dark:bg-green-900/30 rounded-full text-green-500">
+                                    <Send className="w-4 h-4 -rotate-45" />
+                                </div>
+                            )}
+                            {processingAction === "swapping" && (
+                                <div className="p-2 bg-purple-100 dark:bg-purple-900/30 rounded-full text-purple-500">
+                                    <RefreshCw className="w-4 h-4 animate-spin" />
+                                </div>
+                            )}
+
+                            {/* Text or Dots */}
+                            <div className="flex flex-col">
+                                {processingAction === "bridging" ? (
+                                    <>
+                                        <span className="text-xs font-bold text-slate-700 dark:text-slate-200">Bridging Assets...</span>
+                                        <span className="text-[10px] text-slate-400">Cross-chain swaps take ~2-5 mins. I'll notify you when ready.</span>
+                                    </>
+                                ) : processingAction === "sending" ? (
+                                    <>
+                                        <span className="text-xs font-bold text-slate-700 dark:text-slate-200">Processing Transfer...</span>
+                                        <span className="text-[10px] text-slate-400">Sending funds securely.</span>
+                                    </>
+                                ) : processingAction === "swapping" ? (
+                                    <>
+                                        <span className="text-xs font-bold text-slate-700 dark:text-slate-200">Swapping Tokens...</span>
+                                        <span className="text-[10px] text-slate-400">Interacting with Uniswap Pool.</span>
+                                    </>
+                                ) : (
+                                    <div className="flex gap-1">
+                                        <div className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce" />
+                                        <div className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce delay-100" />
+                                        <div className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce delay-200" />
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     </div>
                 )}
@@ -261,8 +388,8 @@ export default function WalletView({ address, session, userId, onLogout, onBack,
                     <button
                         onClick={() => handleSend()}
                         className={`ml-2 p-2 rounded-full transition-all duration-200 ${input.trim()
-                            ? "bg-indigo-600 text-white scale-100 shadow-lg shadow-indigo-500/30"
-                            : "bg-slate-200 text-slate-400 scale-90"
+                            ? "bg-primary text-primary-foreground scale-100 shadow-lg shadow-primary/30"
+                            : "bg-muted text-muted-foreground scale-90"
                             }`}
                     >
                         <Send size={16} />

@@ -90,12 +90,22 @@ const walletCache = new Map<string, Map<string, { walletId: string; address: str
 const getBlockchainId = (chain: string): string => {
     const map: Record<string, string> = {
         'arcTestnet': 'ARC-TESTNET',
+        'arc': 'ARC-TESTNET',
+        'arctestnet': 'ARC-TESTNET',
         'ethereumSepolia': 'ETH-SEPOLIA',
+        'eth': 'ETH-SEPOLIA',
+        'sepolia': 'ETH-SEPOLIA',
         'baseSepolia': 'BASE-SEPOLIA',
+        'base': 'BASE-SEPOLIA',
         'arbitrumSepolia': 'ARB-SEPOLIA',
+        'arb': 'ARB-SEPOLIA',
         'optimismSepolia': 'OP-SEPOLIA',
+        'op': 'OP-SEPOLIA',
         'avalancheFuji': 'AVAX-FUJI',
-        'polygonAmoy': 'MATIC-AMOY'
+        'avax': 'AVAX-FUJI',
+        'polygonAmoy': 'MATIC-AMOY',
+        'matic': 'MATIC-AMOY',
+        'polygon': 'MATIC-AMOY'
     };
     return map[chain] || map[chain.toLowerCase()] || chain;
 };
@@ -250,9 +260,33 @@ export async function executeTransaction(
         console.log(`[ServerWallet] DEBUG - Full transaction params:`, JSON.stringify(txParams, null, 2));
 
         const { data: tx } = await (client as any).createTransaction(txParams);
+        const circleTxId = (tx as any)?.id || (tx as any)?.data?.id || (tx as any)?.data?.transaction?.id;
 
-        console.log(`[ServerWallet] Transaction created:`, (tx as any)?.id || (tx as any)?.data?.id || (tx as any)?.data?.transaction?.id);
-        return (tx as any)?.id || (tx as any)?.data?.id || (tx as any)?.data?.transaction?.id || '';
+        console.log(`[ServerWallet] Transaction created: ${circleTxId}. Polling for blockchain hash...`);
+
+        // Poll for blockchain hash using Circle SDK
+        let txHash: string | undefined;
+        for (let i = 0; i < 15; i++) {
+            try {
+                const { data: statusData } = await client.getTransaction({ id: circleTxId });
+                txHash = (statusData as any)?.transaction?.txHash || (statusData as any)?.txHash;
+                if (txHash && txHash.startsWith('0x')) {
+                    console.log(`[ServerWallet] Blockchain Hash found after ${i + 1} attempts: ${txHash}`);
+                    break;
+                }
+            } catch (pollErr) { /* ignore polling errors */ }
+            await new Promise(r => setTimeout(r, 2000));
+        }
+
+        if (!txHash || !txHash.startsWith('0x')) {
+            console.warn(`[ServerWallet] Transaction ${circleTxId} created but blockchain hash not found yet. Returning Circle ID.`);
+            // Fallback: Return Circle ID if hash not found in time (to avoid timeout)
+            // The user can check status later.
+            return circleTxId || '';
+        }
+
+        return txHash;
+
     } catch (error: any) {
         console.error(`[ServerWallet] Transaction error:`, error.message);
         console.error(`[ServerWallet] Full error object:`, JSON.stringify(error, null, 2));
@@ -354,7 +388,7 @@ export async function getWalletBalance(
     try {
         const { data } = await client.getWalletTokenBalance({
             id: walletId,
-            tokenAddress
+            tokenAddresses: tokenAddress ? [tokenAddress] : undefined
         });
 
         // SUPPORT BOTH FORMATS: Some SDK versions return .tokenBalance, others .tokenBalances array
@@ -366,5 +400,72 @@ export async function getWalletBalance(
     } catch (error: any) {
         console.error(`[ServerWallet] Error getting balance:`, error.message);
         return '0';
+    }
+}
+
+const faucetCooldowns = new Map<string, number>();
+const FAUCET_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 Hours
+
+/**
+ * Request testnet tokens (USDC or Native) from Circle Faucet
+ */
+export async function requestTestnetTokens(
+    userId: string,
+    address: string,
+    blockchain: string = 'ARC-TESTNET',
+    usdc: boolean = true,
+    native: boolean = true // Default to TRUE to ensure user gets GAS
+): Promise<{ success: boolean; error?: string; data?: any }> {
+    const client = getCircleClient();
+    const blockchainId = getBlockchainId(blockchain);
+
+    // RATE LIMIT CHECK
+    const rateLimitKey = `${userId}-${blockchainId}`;
+    const lastRequest = faucetCooldowns.get(rateLimitKey);
+    const now = Date.now();
+
+    // console.log(`[ServerWallet] Checking Rate Limit for Key: ${rateLimitKey}. Last: ${lastRequest}, Now: ${now}`);
+
+    if (lastRequest && (now - lastRequest < FAUCET_COOLDOWN_MS)) {
+        const remainingHours = Math.ceil((FAUCET_COOLDOWN_MS - (now - lastRequest)) / (60 * 60 * 1000));
+        return {
+            success: false,
+            error: `⏳ Faucet Cooldown: You can only request funds once every 24 hours per network.\nWait ${remainingHours}h before requesting on ${blockchainId} again.`
+        };
+    }
+
+    console.log(`[ServerWallet] Requesting Faucet for ${address} (${userId}) on ${blockchainId} (Native: ${native}, USDC: ${usdc})`);
+
+    try {
+        // @ts-ignore
+        const response = await client.requestTestnetTokens({
+            address,
+            blockchain: blockchainId as any,
+            usdc,
+            native // Request both by default
+        });
+
+        console.log(`[ServerWallet] Faucet request success:`, response?.data);
+        faucetCooldowns.set(rateLimitKey, now); // Update Cooldown with specific key
+
+        return { success: true, data: response?.data };
+    } catch (error: any) {
+        console.error(`[ServerWallet] Faucet error:`, error.message);
+
+        // Log detailed Circle error
+        if (error.response?.data) {
+            console.error(`[ServerWallet] Circle API Error Details:`, JSON.stringify(error.response.data, null, 2));
+        }
+
+        if (error.message?.includes("429")) {
+            return { success: false, error: "Circle Faucet is busy (Rate Limit). Try again later." };
+        }
+
+        let finalError = error.message;
+        if (error.response?.data) {
+            finalError += ` | Details: ${JSON.stringify(error.response.data)}`;
+        }
+
+        return { success: false, error: finalError };
     }
 }

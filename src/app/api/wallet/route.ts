@@ -113,6 +113,23 @@ export async function POST(req: NextRequest) {
                 return NextResponse.json(result);
             }
 
+            case 'faucet': {
+                const { blockchain, address } = params;
+                let targetAddress = address;
+
+                // If no address provided, use the user's wallet for that chain
+                if (!targetAddress) {
+                    const wallet = await getOrCreateWallet(actualUserId, blockchain);
+                    targetAddress = wallet.address;
+                }
+
+                // Import dynamically to avoid circular deps if any
+                const { requestTestnetTokens } = await import('@/lib/serverWallet');
+
+                const result = await requestTestnetTokens(actualUserId, targetAddress, blockchain);
+                return NextResponse.json(result);
+            }
+
             default:
                 return NextResponse.json({ success: false, error: 'Unknown action' }, { status: 400 });
         }

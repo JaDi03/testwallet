@@ -11,13 +11,19 @@ export const WalletSkills = {
      */
     getBalance: async (context: AgentContext, chain?: string, tokenSymbol?: string): Promise<ToolResult> => {
         try {
+            console.log(`[DEBUG] WalletSkills.getBalance called for userId: ${context.userId}, chain: ${chain}, token: ${tokenSymbol}`);
             const { resolveChainKey } = await import("../cross-chain/bridgeSkill");
 
             const targetChains = chain
                 ? [resolveChainKey(chain)]
                 : ['arcTestnet', 'ethereumSepolia', 'baseSepolia'];
 
-            const response = await fetch('/api/wallet', {
+            const baseUrl = process.env.NEXT_PUBLIC_URL || 'http://localhost:3000';
+            const url = `${baseUrl}/api/wallet`;
+
+            console.log(`[DEBUG] Fetching balances from: ${url}`);
+
+            const response = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -28,7 +34,17 @@ export const WalletSkills = {
                 }),
             });
 
+            console.log(`[DEBUG] API Response Status: ${response.status}`);
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error(`[DEBUG] API Error Body: ${errorText}`);
+                throw new Error(`API Error ${response.status}: ${errorText}`);
+            }
+
             const data = await response.json();
+            console.log(`[DEBUG] API Data received:`, JSON.stringify(data));
+
             const tokenBalances = data.balances || [];
 
             if (tokenBalances.length === 0) {
@@ -42,7 +58,7 @@ export const WalletSkills = {
 
             if (!chain) {
                 // Multi-chain Portfolio Check
-                const report = tokenBalances.map((t: any) => `- **${t.balance} ${t.symbol}** on ${t.chain}`).join('\n');
+                const report = tokenBalances.map((t: any) => `- ${t.balance} ${t.symbol} on ${t.chain}`).join('\n');
                 return {
                     success: true,
                     message: `Here is your current portfolio:\n${report}`,
@@ -58,7 +74,7 @@ export const WalletSkills = {
                 data: tokenBalances
             };
         } catch (e: any) {
-            console.error(e);
+            console.error(`[DEBUG] createWallet/getBalance Failed:`, e);
             return { success: false, message: `Failed to fetch balance: ${e.message}` };
         }
     },
@@ -75,20 +91,50 @@ export const WalletSkills = {
             const { resolveChainKey } = await import("../cross-chain/bridgeSkill");
             const { CCTP_CONFIG } = await import("../cross-chain/config");
 
-            const chainKey = chain ? resolveChainKey(chain) : 'arcTestnet';
-            const isArc = chainKey === 'arcTestnet';
+            const chainKey = (chain ? resolveChainKey(chain) : 'arcTestnet') || 'arcTestnet';
 
-            const hash = await sendTransfer(to, amount, CLIENT_URL, CLIENT_KEY, context.session, (chainKey as string) || 'arcTestnet');
-            const explorer = (CCTP_CONFIG as any)[chainKey || 'arcTestnet']?.explorer || 'https://explorer-testnet.arc.circle.com';
+            console.log(`[WalletSkills] Executing Transfer: ${amount} USDC -> ${to} on ${chainKey}`);
 
-            return {
-                success: true,
-                message: isArc
-                    ? `Transfer successful on Arc Hub! Hash: ${hash}`
-                    : `Funds sent on ${chainKey} (via Arc Extension). Hash: ${hash}`,
-                data: { hash, explorer: `${explorer}/tx/${hash}` },
-                action: "tx_link"
-            };
+            // SERVER-SIDE EXECUTION (No session needed, uses Developer Wallet)
+            try {
+                // 1. Get Wallet
+                const { getOrCreateWallet, executeTransaction } = await import("@/lib/serverWallet");
+                const wallet = await getOrCreateWallet(context.userId || '', chainKey || 'arcTestnet');
+
+                // 2. Get USDC Address (if not native Arc)
+                let tokenAddress: string | undefined;
+                if (chainKey !== 'arcTestnet') {
+                    const usdcAddresses: Record<string, string> = {
+                        'ethereumSepolia': '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
+                        'baseSepolia': '0x036CbD53842c5426634e7929541eC2318f3dCF7e'
+                    };
+                    tokenAddress = usdcAddresses[chainKey];
+                }
+
+                // 3. Execute
+                const resultId = await executeTransaction(wallet.walletId, to, amount, tokenAddress, chainKey);
+
+                const explorer = (CCTP_CONFIG as any)[chainKey]?.explorer || 'https://explorer-testnet.arc.circle.com';
+                const isHash = resultId.startsWith('0x');
+                const label = isHash ? 'Hash' : 'Request ID (Pending)';
+                const explorerLink = isHash ? `${explorer}/tx/${resultId}` : undefined;
+
+                return {
+                    success: true,
+                    message: `✅ Transfer Sent! ${label}: ${resultId}`,
+                    data: {
+                        hash: resultId,
+                        explorer: explorerLink,
+                        isPending: !isHash
+                    },
+                    action: "tx_link"
+                };
+
+            } catch (serverError: any) {
+                console.error("Server Transfer Failed:", serverError);
+                throw serverError; // Let catch block below handle it
+            }
+
         } catch (e: any) {
             console.error(e);
             return { success: false, message: `Transfer failed on Arc/Extension: ${e.message || "Unknown error"}` };
@@ -98,12 +144,58 @@ export const WalletSkills = {
     /**
      * Faucet Request (Arc Specific)
      */
-    requestFaucet: async (context: AgentContext): Promise<ToolResult> => {
-        return {
-            success: true,
-            message: "To get funds for the Arc Hub, please visit the official Circle Faucet.",
-            data: { url: "https://faucet.arc.circle.com", address: context.userAddress },
-            action: "faucet_card"
-        };
+    requestFaucet: async (context: AgentContext, chain?: string): Promise<ToolResult> => {
+        const targetChain = chain || 'arcTestnet';
+        console.log(`[WalletSkills] Requesting Faucet for ${context.userId} on ${targetChain} (Address: ${context.userAddress})`);
+
+        try {
+            const baseUrl = process.env.NEXT_PUBLIC_URL || 'http://localhost:3000';
+            const response = await fetch(`${baseUrl}/api/wallet`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    action: 'faucet',
+                    userId: context.userId,
+                    blockchain: targetChain,
+                    address: context.userAddress
+                }),
+            });
+
+            if (!response.ok) {
+                const error = await response.text();
+                throw new Error(error);
+            }
+
+            const data = await response.json();
+
+            if (data.success) {
+                return {
+                    success: true,
+                    message: `✅ Faucet Request Successful! Sent testnet tokens to your wallet on ${targetChain}.\nCheck your balance in a few seconds.`,
+                    data: data
+                };
+            } else {
+                throw new Error(data.error || 'Unknown error');
+            }
+
+        } catch (e: any) {
+            console.error(`[WalletSkills] Faucet failed:`, e);
+
+            // Handle clean rate limit message if it comes from our API
+            if (e.message?.includes("⏳ Faucet Cooldown")) {
+                return {
+                    success: false,
+                    message: e.message, // Return the clean message directly
+                    action: "faucet_card"
+                };
+            }
+
+            return {
+                success: false, // Return false so the agent knows it failed
+                message: `⚠️ Auto-Faucet failed: ${e.message}.\n\nYou can try manually at the official faucet:`,
+                data: { url: "https://faucet.circle.com", address: context.userAddress },
+                action: "faucet_card"
+            };
+        }
     }
 };

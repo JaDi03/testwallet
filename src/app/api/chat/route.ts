@@ -1,112 +1,164 @@
 // @ts-nocheck
-import { google } from '@ai-sdk/google';
-import { generateText, tool } from 'ai';
-import { z } from 'zod';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import { SKILL_REGISTRY } from '@/agent/skills/registry';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 
-// Allow streaming responses up to 30 seconds
-export const maxDuration = 30;
+// Allow streaming responses (though we might return JSON for simplicity first)
+// Max duration for Edge/Serverless functions (Local can be infinite, Vercel Pro 300s, Enterprise 900s)
+// Sepolia Finality for CCTP is ~12-15 mins. Let's set to 900s (15m) for local dev.
+export const maxDuration = 900;
+
+// Initialize Google AI
+const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY || "";
+const genAI = new GoogleGenerativeAI(apiKey);
 
 export async function POST(req: Request) {
     try {
-        const body = await req.json();
-        const { messages } = body;
+        const { messages, userId, userAddress: bodyUserAddress } = await req.json();
 
-        console.log("🔹 AI Request Received:", messages.length, "messages");
+        console.log("🔹 AI Request (Google SDK):", messages.length, "messages", userId ? `from user ${userId}` : "(no userId)");
 
-        const result = await generateText({
-            model: google('gemini-2.5-flash-lite'),
-            messages,
-            system: `You are the 'Arc Native Smart Wallet' AI.
-    Philosophy:
-    1. **Multi-Chain Native**: You are an expert that operates natively across Arc, Ethereum Sepolia, and Base Sepolia.
-    2. **Local Priority**: If the user has funds on Sepolia or Base, you MUST execute trades (swap) DIRECTLY on those chains. NEVER claim you can only do it on Arc.
+        // 1. Prepare Tools (Function Declarations)
+        const tools = [{
+            functionDeclarations: SKILL_REGISTRY.map(skill => {
+                const jsonSchema = zodToJsonSchema(skill.parameters);
+                // Clean schema for Gemini
+                const cleanSchema = {
+                    type: 'object',
+                    properties: (jsonSchema as any).properties,
+                    required: (jsonSchema as any).required,
+                };
+                if (cleanSchema.required && cleanSchema.required.length === 0) {
+                    delete cleanSchema.required;
+                }
+                return {
+                    name: skill.name,
+                    description: skill.description,
+                    parameters: cleanSchema,
+                };
+            })
+        }];
 
-    Rules:
-    1. **SWAP ANYWHERE**: You can swap on Arc, Sepolia, and Base. It is FALSE to say otherwise.
-    2. **Context Persistence**: If the user says "sell el WETH", use the chain where it was bought (e.g., Sepolia).
-    3. **Tool Parameters**: Always provide 'fromToken', 'toToken', 'amount', and 'chain'.
-    4. **Language**: Always reply in the user's detected language.
-    
-    Current Hub: Arc Testnet (Chain ID 5042002).
-    Supported Extensions: Base, Ethereum Sepolia.`,
-            tools: {
-                getBalance: tool({
-                    description: 'Get asset balances (ETH, USDC, WETH, etc.) for the user. If "chain" is omitted, returns balances across ALL supported chains (Arc, Sepolia, Base). You can also specify a "token" symbol or address to check a specific asset.',
-                    parameters: z.object({
-                        chain: z.string().optional().describe('The network to check balance (e.g. Arc, Base, ETH). Leave empty for ALL.'),
-                        token: z.string().optional().describe('Specific token symbol (e.g. BNB, PEPE) or 0x address to check.')
-                    }),
-                }) as any,
-                transfer: tool({
-                    description: 'Send assets (mainly USDC) to a specific address on a specific chain.',
-                    parameters: z.object({
-                        to: z.string().describe('The destination 0x address'),
-                        amount: z.string().describe('The amount to send'),
-                        chain: z.string().optional().describe('The network to send on (defaults to current)')
-                    }),
-                }) as any,
-                invest: tool({
-                    description: 'Invest or Stake USDC into a Yield Vault',
-                    parameters: z.object({
-                        amount: z.string().describe('The amount to invest'),
-                    }),
-                }) as any,
-                addLiquidity: tool({
-                    description: 'Add liquidity to a DeFi Pool',
-                    parameters: z.object({
-                        tokenA: z.string().describe('The first token symbol (e.g. USDC)'),
-                        tokenB: z.string().describe('The second token symbol (e.g. ETH)'),
-                        amount: z.string().describe('The amount of Token A to deposit'),
-                    }),
-                }) as any,
-                bridge: tool({
-                    description: 'Bridge USDC to another chain (Base, Sepolia) using CCTP.',
-                    parameters: z.object({
-                        sourceChain: z.string().optional().describe('The source chain'),
-                        destinationChain: z.string().describe('The target chain'),
-                        amount: z.string().describe('The amount of USDC to bridge'),
-                        recipient: z.string().optional().describe('The destination 0x address'),
-                    }),
-                }) as any,
-                swap: tool({
-                    description: 'Swap tokens on a DEX. Use symbols like "USDC", "WETH". System handles addresses.',
-                    parameters: z.object({
-                        fromToken: z.string().describe('Symbol of token to sell'),
-                        toToken: z.string().describe('Symbol of token to buy'),
-                        amount: z.string().describe('Amount string'),
-                        maxSlippage: z.number().optional().describe('Slippage %'),
-                        chain: z.string().optional().describe('Network')
-                    }),
-                }) as any,
-                getQuote: tool({
-                    description: 'Get a price quote for a swap.',
-                    parameters: z.object({
-                        fromToken: z.string().describe('Token to sell'),
-                        toToken: z.string().describe('Token to buy'),
-                        amount: z.string().describe('Amount'),
-                        chain: z.string().optional().describe('Network')
-                    }),
-                }) as any,
-                faucet: tool({
-                    description: 'Get instructions for the Testnet Faucet',
-                    parameters: z.object({}),
-                }) as any,
+        console.log("🔹 Gemini Tools Payload:", JSON.stringify(tools, null, 2));
+
+        // 2. Prepare Chat History (Convert Vercel Message format to Google format)
+        // Strict Validation: History MUST start with 'user'
+
+        let rawHistory = messages.slice(0, -1).map((m: any) => ({
+            role: m.role === 'user' ? 'user' : 'model',
+            parts: [{ text: m.content }]
+        }));
+
+        // Find the first 'user' message index
+        const firstUserIndex = rawHistory.findIndex((m: any) => m.role === 'user');
+
+        let validHistory: any[] = [];
+        if (firstUserIndex !== -1) {
+            validHistory = rawHistory.slice(firstUserIndex);
+        } else {
+            validHistory = [];
+        }
+
+        const lastMessage = messages[messages.length - 1];
+        const userPrompt = lastMessage.content;
+
+        // 2a. Fetch User Context (Address)
+        // We use 'arcTestnet' as the default to get the UNIVERSAL address (same for all EVM chains)
+        let userAddress = bodyUserAddress || "0x...";
+        // If provided a userId but NO address, fetch it (just in case)
+        if (userId && (!bodyUserAddress || bodyUserAddress === "0x...")) {
+            try {
+                // Import dynamically to avoid build issues if not used
+                const { getOrCreateWallet } = await import('@/lib/serverWallet');
+                const wallet = await getOrCreateWallet(userId, 'arcTestnet');
+                userAddress = wallet.address;
+                console.log(`🔹 Context: User ${userId} -> ${userAddress}`);
+            } catch (e) {
+                console.error("Failed to fetch user wallet for context:", e);
+                userAddress = "Unknown (Error fetching wallet)";
+            }
+        }
+
+        // 3. Initialize Model with PERONA
+        const { AGENT_PERSONA } = await import("@/agent/prompts");
+
+        const model = genAI.getGenerativeModel({
+            model: "gemini-2.0-flash",
+            systemInstruction: AGENT_PERSONA(userAddress, SKILL_REGISTRY),
+            tools: tools as any,
+            toolConfig: { functionCallingConfig: { mode: 'AUTO' } }
+        });
+
+        // 4. Start Chat & Send Message
+        const chat = model.startChat({
+            history: validHistory,
+            generationConfig: {
+                maxOutputTokens: 1000,
+                temperature: 0, // Force deterministic behavior to reduce hallucinations
             },
         });
 
-        return Response.json({
-            text: result.text,
-            toolCalls: result.toolCalls
-        });
-    } catch (error: any) {
-        console.error("🔥 AI SERVER ERROR:", error);
-        // Log more detail if it's a model error
-        if (error.response) {
-            console.error("📦 API Response Error:", await error.response.text());
+        console.log(`🔹 Sending prompt to Gemini: "${userPrompt.substring(0, 50)}..."`);
+        const result = await chat.sendMessage(userPrompt);
+        const response = await result.response;
+
+        // DEBUG: Log the full response to see if it's returning text instead of tool calls
+        console.log("🔹 Gemini Raw Response Candidates:", JSON.stringify(response.candidates, null, 2));
+
+        // 5. Handle Function Calls
+        // NOTE: functionCalls() returns an array. We MUST handle all of them or ensure response parts match.
+        // Even if we only support one, we must send back responses for all detected calls to satisfy the API.
+        const calls = response.functionCalls();
+
+        if (calls && calls.length > 0) {
+            console.log(`[Agent] Detected ${calls.length} tool calls.`);
+
+            const functionResponses = [];
+
+            for (const call of calls) {
+                console.log(`[Agent] Executing: ${call.name}`, call.args);
+
+                const skill = SKILL_REGISTRY.find(s => s.name === call.name);
+                let toolResult;
+
+                if (skill) {
+                    const context = { userAddress: userAddress, userId: userId, session: null };
+                    try {
+                        toolResult = await skill.execute(call.args, context);
+                    } catch (err: any) {
+                        toolResult = { success: false, message: `Error executing tool: ${err.message}` };
+                    }
+                } else {
+                    console.error(`Tool ${call.name} not found.`);
+                    toolResult = { error: "Tool not found" };
+                }
+
+                console.log(`[Agent] Result for ${call.name}:`, JSON.stringify(toolResult).substring(0, 100) + "...");
+
+                // Construct the response part for THIS specific call
+                functionResponses.push({
+                    functionResponse: {
+                        name: call.name,
+                        response: { name: call.name, content: toolResult }
+                    }
+                });
+            }
+
+            // Send ALL results back to Model (Turn 2)
+            // The API expects an array of parts.
+            const finalResult = await chat.sendMessage(functionResponses);
+            const finalResponse = await finalResult.response;
+            const finalText = finalResponse.text();
+
+            return Response.json({ text: finalText });
         }
-        return Response.json({
-            error: error.message || "Unknown AI Error",
-            details: error.stack || error
-        }, { status: 500 });
+
+        // Normal Text Response
+        const text = response.text();
+        return Response.json({ text: text });
+
+    } catch (error: any) {
+        console.error("🔥 AI SERVER ERROR (Google SDK):", error);
+        return Response.json({ error: error.message || "Unknown AI Error" }, { status: 500 });
     }
 }

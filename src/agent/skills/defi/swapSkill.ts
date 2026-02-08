@@ -76,7 +76,8 @@ export const SwapSkill = {
                 return { success: false, message: 'Missing userId in context' };
             }
 
-            const walletResp = await fetch('/api/wallet', {
+            const baseUrl = process.env.NEXT_PUBLIC_URL || 'http://localhost:3000';
+            const walletResp = await fetch(`${baseUrl}/api/wallet`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ action: 'getOrCreateWallet', userId, blockchain: chainKey }),
@@ -166,7 +167,9 @@ export const SwapSkill = {
             // 11. Approve if needed
             if (allowance < amountIn) {
                 console.log(`[SwapSkill] Approving ${fromToken} for router...`);
-                const approveResp = await fetch('/api/wallet', {
+                // ensure baseUrl is defined in scope or redefined
+
+                const approveResp = await fetch(`${baseUrl}/api/wallet`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -196,7 +199,8 @@ export const SwapSkill = {
             console.log(`  Min Out: ${formatUnits(minOut, toDecimals)} ${toToken}`);
             console.log(`  Slippage: ${slippage}%`);
 
-            const swapResp = await fetch('/api/wallet', {
+
+            const swapResp = await fetch(`${baseUrl}/api/wallet`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -223,7 +227,7 @@ export const SwapSkill = {
 
             return {
                 success: true,
-                message: `✅ Swapped ${amount} ${fromToken} for ~${formatUnits(expectedOut, toDecimals)} ${toToken} on ${config.name}!`,
+                message: `✅ Swap Successful! Swapped ${amount} ${fromToken} for ~${formatUnits(expectedOut, toDecimals)} ${toToken} on ${config.name}.\n🔗 TX: [${swapResult.txHash.substring(0, 8)}...](${config.explorer}/tx/${swapResult.txHash})`,
                 data: {
                     txHash: swapResult.txHash,
                     explorer: `${config.explorer}/tx/${swapResult.txHash}`,
